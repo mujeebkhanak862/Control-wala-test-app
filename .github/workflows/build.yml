@@ -1,66 +1,172 @@
 
-      - name: Extract and Find Flutter Project
+name: Build All Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Locate Flutter project
+        id: flutter
         shell: bash
         run: |
-          set -euo pipefail
-
-          SOURCE_DIR="$RUNNER_TEMP/uda-source"
-          EXTRACT_DIR="$RUNNER_TEMP/uda-extracted"
-          mkdir -p "$SOURCE_DIR" "$EXTRACT_DIR"
-
-          APP_DIR=""
-
-          # Pehle repository mein Flutter app dhoondo
-          while IFS= read -r -d '' file; do
-            dir="${file%/pubspec.yaml}"
-            if [ -f "$dir/lib/main.dart" ]; then
-              APP_DIR="$dir"
-              break
-            fi
-          done < <(find "$GITHUB_WORKSPACE" \
-            -type f -name pubspec.yaml \
-            -not -path '*/.git/*' \
-            -not -path '*/.dart_tool/*' -print0)
-
-          # Agar repository mein app na mile to ZIP extract karo
-          if [ -z "$APP_DIR" ]; then
-            while IFS= read -r -d '' archive; do
-              DEST="$EXTRACT_DIR/$(basename "$archive" .zip)"
-              mkdir -p "$DEST"
-              unzip -oq "$archive" -d "$DEST"
-
-              while IFS= read -r -d '' file; do
-                dir="${file%/pubspec.yaml}"
-                if [ -f "$dir/lib/main.dart" ]; then
-                  APP_DIR="$dir"
-                  break
-                fi
-              done < <(find "$DEST" \
-                -type f -name pubspec.yaml \
-                -not -path '*/.dart_tool/*' -print0)
-
-              [ -n "$APP_DIR" ] && break
-            done < <(find "$GITHUB_WORKSPACE" \
-              -type f -iname '*.zip' \
-              -not -path '*/.git/*' -print0)
-          fi
-
-          if [ -z "$APP_DIR" ]; then
-            echo "ERROR: Flutter app nahi mili."
-            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | head -n 200
+          if [ -f "shared_app/pubspec.yaml" ]; then
+            echo "dir=shared_app" >> "$GITHUB_OUTPUT"
+          elif [ -f "pubspec.yaml" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            echo "Flutter project not found at repository root or shared_app/"
             exit 1
           fi
 
-          echo "Flutter project found: $APP_DIR"
+      - name: Install Flutter dependencies
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter pub get
 
-          # App ko expected shared_app folder mein copy karo
-          mkdir -p "$SOURCE_DIR/shared_app"
-          cp -a "$APP_DIR/." "$SOURCE_DIR/shared_app/"
+      - name: Build APK
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter build apk --release
 
-          if [ ! -f "$SOURCE_DIR/shared_app/pubspec.yaml" ] || \
-             [ ! -f "$SOURCE_DIR/shared_app/lib/main.dart" ]; then
-            echo "ERROR: Flutter source copy nahi ho saka."
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK
+          path: ${{ steps.flutter.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows App
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Locate Flutter project
+        id: flutter
+        shell: pwsh
+        run: |
+          if (Test-Path "shared_app/pubspec.yaml") {
+            "dir=shared_app" >> $env:GITHUB_OUTPUT
+          } elseif (Test-Path "pubspec.yaml") {
+            "dir=." >> $env:GITHUB_OUTPUT
+          } else {
+            throw "Flutter project not found at repository root or shared_app/"
+          }
+
+      - name: Install dependencies
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter pub get
+
+      - name: Enable Windows desktop
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter config --enable-windows-desktop
+
+      - name: Build Windows app
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter build windows --release
+
+      - name: Package Windows files
+        shell: pwsh
+        run: |
+          $dir = "${{ steps.flutter.outputs.dir }}/build/windows/x64/runner/Release"
+          if (!(Test-Path $dir)) {
+            $dir = "${{ steps.flutter.outputs.dir }}/build/windows/runner/Release"
+          }
+          if (!(Test-Path $dir)) {
+            throw "Windows build output folder not found"
+          }
+          Compress-Archive -Path "$dir/*" -DestinationPath "Windows-App.zip"
+
+      - name: Upload Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-App
+          path: Windows-App.zip
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev \
+            libstdc++-12-dev dpkg-dev
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Locate Flutter project
+        id: flutter
+        shell: bash
+        run: |
+          if [ -f "shared_app/pubspec.yaml" ]; then
+            echo "dir=shared_app" >> "$GITHUB_OUTPUT"
+          elif [ -f "pubspec.yaml" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            echo "Flutter project not found at repository root or shared_app/"
             exit 1
           fi
 
-          echo "Flutter source successfully prepared."
+      - name: Install dependencies
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter pub get
+
+      - name: Enable Linux desktop
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter config --enable-linux-desktop
+
+      - name: Build Linux app
+        working-directory: ${{ steps.flutter.outputs.dir }}
+        run: flutter build linux --release
+
+      - name: Upload Linux app files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-App
+          path: ${{ steps.flutter.outputs.dir }}/build/linux/x64/release/bundle/
+          if-no-files-found: error
