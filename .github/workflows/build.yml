@@ -1,44 +1,122 @@
 
-name: Backend Deploy
+name: Build Universal Device Agent
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
-      - "control_api/**"
-      - ".github/workflows/deploy-backend.yml"
+      - "shared_app/**"
+      - ".github/workflows/build-apps.yml"
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
-    name: Deploy Backend to Railway
+  android:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get Source Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check Railway Secrets
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
-        run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "Missing RAILWAY_TOKEN secret"
-            exit 1
-          fi
-          if [ -z "$RAILWAY_SERVICE_ID" ]; then
-            echo "Missing RAILWAY_SERVICE_ID variable"
-            exit 1
-          fi
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - name: Install Railway CLI
-        run: |
-          npm install -g @railway/cli
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
-      - name: Deploy Backend
-        working-directory: control_api
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+      - name: Install Dependencies
+        working-directory: shared_app
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: shared_app
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Universal-Device-Agent-Android-APK
+          path: shared_app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Windows Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Install Dependencies
+        working-directory: shared_app
+        run: flutter pub get
+
+      - name: Build Windows App
+        working-directory: shared_app
+        run: flutter build windows --release
+
+      - name: Upload Windows App
+        uses: actions/upload-artifact@v4
+        with:
+          name: Universal-Device-Agent-Windows
+          path: shared_app/build/windows/x64/runner/Release/
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux App
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux Dependencies
         run: |
-          railway up --service "$RAILWAY_SERVICE_ID" --detach
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev \
+            libstdc++-12-dev
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable Linux Desktop
+        run: flutter config --enable-linux-desktop
+
+      - name: Install Dependencies
+        working-directory: shared_app
+        run: flutter pub get
+
+      - name: Build Linux App
+        working-directory: shared_app
+        run: flutter build linux --release
+
+      - name: Upload Linux App
+        uses: actions/upload-artifact@v4
+        with:
+          name: Universal-Device-Agent-Linux
+          path: shared_app/build/linux/x64/release/bundle/
+          if-no-files-found: error
