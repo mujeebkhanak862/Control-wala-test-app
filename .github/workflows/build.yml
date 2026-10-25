@@ -1,5 +1,5 @@
 
-name: Build All Apps
+name: Build Universal Device Agent
 
 on:
   workflow_dispatch:
@@ -7,18 +7,62 @@ on:
     branches:
       - main
       - master
+    paths:
+      - "APK/**"
+      - "EXE/**"
+      - "OS/**"
+      - "Backend/**"
+      - "Website/**"
+      - ".github/workflows/build-all.yml"
 
 permissions:
   contents: read
 
 jobs:
-  android:
-    name: Build Android APK
+  backend:
+    name: Build Backend
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Backend
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Analyze code
+        run: dart analyze
+
+      - name: Run tests
+        run: dart test
+
+      - name: Compile backend
+        run: dart compile exe bin/server.dart -o ../backend-server
+
+      - name: Upload backend
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-linux-x64
+          path: backend-server
+          if-no-files-found: error
+
+  android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: APK/shared_app
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -32,41 +76,37 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Locate Flutter project
-        id: flutter
-        shell: bash
-        run: |
-          if [ -f "shared_app/pubspec.yaml" ]; then
-            echo "dir=shared_app" >> "$GITHUB_OUTPUT"
-          elif [ -f "pubspec.yaml" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            echo "Flutter project not found at repository root or shared_app/"
-            exit 1
-          fi
+      - name: Generate Android files
+        run: flutter create --platforms=android --org com.deviceagent --project-name shared_app .
 
-      - name: Install Flutter dependencies
-        working-directory: ${{ steps.flutter.outputs.dir }}
+      - name: Install dependencies
         run: flutter pub get
 
+      - name: Analyze Flutter code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Flutter tests
+        run: flutter test
+
       - name: Build APK
-        working-directory: ${{ steps.flutter.outputs.dir }}
-        run: flutter build apk --release
+        run: flutter build apk --release --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Android-APK
-          path: ${{ steps.flutter.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
+          name: universal-device-agent-android-apk
+          path: APK/shared_app/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
-  windows:
-    name: Build Windows App
+  windows-exe:
+    name: Build Windows EXE
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: EXE/shared_app
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -74,64 +114,42 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Locate Flutter project
-        id: flutter
-        shell: pwsh
-        run: |
-          if (Test-Path "shared_app/pubspec.yaml") {
-            "dir=shared_app" >> $env:GITHUB_OUTPUT
-          } elseif (Test-Path "pubspec.yaml") {
-            "dir=." >> $env:GITHUB_OUTPUT
-          } else {
-            throw "Flutter project not found at repository root or shared_app/"
-          }
+      - name: Generate Windows files
+        run: flutter create --platforms=windows --org com.deviceagent --project-name shared_app .
 
       - name: Install dependencies
-        working-directory: ${{ steps.flutter.outputs.dir }}
         run: flutter pub get
 
-      - name: Enable Windows desktop
-        working-directory: ${{ steps.flutter.outputs.dir }}
-        run: flutter config --enable-windows-desktop
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
 
-      - name: Build Windows app
-        working-directory: ${{ steps.flutter.outputs.dir }}
-        run: flutter build windows --release
+      - name: Run tests
+        run: flutter test
 
-      - name: Package Windows files
-        shell: pwsh
-        run: |
-          $dir = "${{ steps.flutter.outputs.dir }}/build/windows/x64/runner/Release"
-          if (!(Test-Path $dir)) {
-            $dir = "${{ steps.flutter.outputs.dir }}/build/windows/runner/Release"
-          }
-          if (!(Test-Path $dir)) {
-            throw "Windows build output folder not found"
-          }
-          Compress-Archive -Path "$dir/*" -DestinationPath "Windows-App.zip"
+      - name: Build Windows application
+        run: flutter build windows --release --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
 
-      - name: Upload Windows app
+      - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-App
-          path: Windows-App.zip
+          name: universal-device-agent-windows
+          path: EXE/shared_app/build/windows/x64/runner/Release/**
           if-no-files-found: error
 
-  linux:
-    name: Build Linux App
+  linux-build:
+    name: Build Linux application
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: OS/shared_app
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake ninja-build pkg-config \
-            libgtk-3-dev liblzma-dev \
-            libstdc++-12-dev dpkg-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglib2.0-dev
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -139,34 +157,41 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Locate Flutter project
-        id: flutter
-        shell: bash
-        run: |
-          if [ -f "shared_app/pubspec.yaml" ]; then
-            echo "dir=shared_app" >> "$GITHUB_OUTPUT"
-          elif [ -f "pubspec.yaml" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            echo "Flutter project not found at repository root or shared_app/"
-            exit 1
-          fi
+      - name: Generate Linux files
+        run: flutter create --platforms=linux --org com.deviceagent --project-name shared_app .
 
       - name: Install dependencies
-        working-directory: ${{ steps.flutter.outputs.dir }}
         run: flutter pub get
 
-      - name: Enable Linux desktop
-        working-directory: ${{ steps.flutter.outputs.dir }}
-        run: flutter config --enable-linux-desktop
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
 
-      - name: Build Linux app
-        working-directory: ${{ steps.flutter.outputs.dir }}
-        run: flutter build linux --release
+      - name: Run tests
+        run: flutter test
 
-      - name: Upload Linux app files
+      - name: Build Linux application
+        run: flutter build linux --release --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
+
+      - name: Upload Linux build
         uses: actions/upload-artifact@v4
         with:
-          name: Linux-App
-          path: ${{ steps.flutter.outputs.dir }}/build/linux/x64/release/bundle/
+          name: universal-device-agent-linux
+          path: OS/shared_app/build/linux/x64/release/bundle/**
+          if-no-files-found: error
+
+  website:
+    name: Package Website
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify website
+        run: test -s Website/index.html
+
+      - name: Upload website
+        uses: actions/upload-artifact@v4
+        with:
+          name: universal-device-agent-website
+          path: Website/**
           if-no-files-found: error
