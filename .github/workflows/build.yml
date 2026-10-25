@@ -4,119 +4,77 @@ name: Build Universal Device Agent
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-    paths:
-      - "shared_app/**"
-      - ".github/workflows/build-apps.yml"
 
 permissions:
   contents: read
 
 jobs:
   android:
-    name: Build Android APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
-
-      - name: Install Dependencies
+      - name: Prepare Android project
         working-directory: shared_app
-        run: flutter pub get
-
+        run: |
+          flutter create --platforms=android --org com.deviceagent --project-name shared_app .
+          rm -f android/settings.gradle.kts android/build.gradle.kts android/app/build.gradle.kts
+          rm -rf android/app/src/main/kotlin/com/example
+          flutter pub get
       - name: Build APK
         working-directory: shared_app
-        run: flutter build apk --release
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+        run: flutter build apk --debug
+      - uses: actions/upload-artifact@v4
         with:
-          name: Universal-Device-Agent-Android-APK
-          path: shared_app/build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
+          name: Android-APK
+          path: shared_app/build/app/outputs/flutter-apk/app-debug.apk
 
   windows:
-    name: Build Windows EXE
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
-
-      - name: Enable Windows Desktop
-        run: flutter config --enable-windows-desktop
-
-      - name: Install Dependencies
+      - name: Prepare Windows project
         working-directory: shared_app
-        run: flutter pub get
-
-      - name: Build Windows App
+        run: flutter create --platforms=windows --org com.deviceagent --project-name shared_app .
+      - name: Build EXE application
         working-directory: shared_app
-        run: flutter build windows --release
-
-      - name: Upload Windows App
-        uses: actions/upload-artifact@v4
+        run: |
+          flutter pub get
+          flutter build windows --release
+      - uses: actions/upload-artifact@v4
         with:
-          name: Universal-Device-Agent-Windows
+          name: Windows-App
           path: shared_app/build/windows/x64/runner/Release/
-          if-no-files-found: error
 
   linux:
-    name: Build Linux App
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Linux Dependencies
+      - uses: actions/checkout@v4
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake ninja-build pkg-config \
-            libgtk-3-dev liblzma-dev \
-            libstdc++-12-dev
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+      - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
-
-      - name: Enable Linux Desktop
-        run: flutter config --enable-linux-desktop
-
-      - name: Install Dependencies
+      - name: Prepare Linux project
         working-directory: shared_app
-        run: flutter pub get
-
-      - name: Build Linux App
+        run: flutter create --platforms=linux --org com.deviceagent --project-name shared_app .
+      - name: Build Linux app
         working-directory: shared_app
-        run: flutter build linux --release
-
-      - name: Upload Linux App
-        uses: actions/upload-artifact@v4
+        run: |
+          flutter pub get
+          flutter build linux --release
+      - uses: actions/upload-artifact@v4
         with:
-          name: Universal-Device-Agent-Linux
+          name: Linux-App
           path: shared_app/build/linux/x64/release/bundle/
-          if-no-files-found: error
