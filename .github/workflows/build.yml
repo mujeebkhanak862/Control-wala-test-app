@@ -4,18 +4,111 @@ name: Build Universal Device Agent
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - master
 
 permissions:
   contents: read
 
 jobs:
-  android:
-    name: Build Android APK
+  prepare:
+    name: Find and Prepare Source
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Extract and Find Flutter Project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/uda-source"
+
+          # Pehle repository mein mojood Flutter project dhoondo
+          APP_DIR=""
+
+          while IFS= read -r -d '' file; do
+            dir="${file%/pubspec.yaml}"
+            if [ -f "$dir/lib/main.dart" ]; then
+              APP_DIR="$dir"
+              break
+            fi
+          done < <(find . -type f -name pubspec.yaml \
+            -not -path '*/.git/*' \
+            -not -path '*/.dart_tool/*' -print0)
+
+          # Agar project na mile to ZIP files extract karo
+          if [ -z "$APP_DIR" ]; then
+            find . -type f -iname '*.zip' \
+              -not -path '*/.git/*' \
+              -print0 |
+            while IFS= read -r -d '' archive; do
+              unzip -oq "$archive" -d "$RUNNER_TEMP/uda-source"
+            done
+
+            while IFS= read -r -d '' file; do
+              dir="${file%/pubspec.yaml}"
+              if [ -f "$dir/lib/main.dart" ]; then
+                echo "FOUND_APP=$dir" >> "$RUNNER_TEMP/found.txt"
+                break
+              fi
+            done < <(find "$RUNNER_TEMP/uda-source" \
+              -type f -name pubspec.yaml \
+              -not -path '*/.dart_tool/*' -print0)
+
+            if [ -f "$RUNNER_TEMP/found.txt" ]; then
+              APP_DIR="$(cat "$RUNNER_TEMP/found.txt")"
+            fi
+          fi
+
+          if [ -z "$APP_DIR" ]; then
+            echo "ERROR: Flutter project nahi mili."
+            echo "pubspec.yaml aur lib/main.dart required hain."
+            find . -maxdepth 5 -type f | head -n 200
+            exit 1
+          fi
+
+          echo "Flutter project found: $APP_DIR"
+
+          # Project root mein shared_app folder expected hai
+          PROJECT_ROOT="$(dirname "$APP_DIR")"
+
+          if [ "$(basename "$APP_DIR")" = "shared_app" ]; then
+            cp -a "$PROJECT_ROOT/." "$RUNNER_TEMP/uda-source/"
+          else
+            mkdir -p "$RUNNER_TEMP/uda-source/shared_app"
+            cp -a "$APP_DIR/." "$RUNNER_TEMP/uda-source/shared_app/"
+          fi
+
+          if [ ! -f "$RUNNER_TEMP/uda-source/shared_app/pubspec.yaml" ]; then
+            echo "ERROR: shared_app/pubspec.yaml nahi mili."
+            exit 1
+          fi
+
+      - name: Upload Prepared Source
+        uses: actions/upload-artifact@v4
+        with:
+          name: uda-source
+          path: ${{ runner.temp }}/uda-source/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  android:
+    name: Build Android APK
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Source
+        uses: actions/download-artifact@v4
+        with:
+          name: uda-source
+          path: source
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -29,72 +122,39 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Find Flutter Project
-        shell: bash
-        run: |
-          APP_DIR=""
-          while IFS= read -r file; do
-            dir="${file%/pubspec.yaml}"
-            if [ -f "$dir/lib/main.dart" ]; then
-              APP_DIR="$(realpath "$dir")"
-              break
-            fi
-          done < <(find . -type f -name pubspec.yaml \
-            -not -path '*/.dart_tool/*')
-
-          if [ -z "$APP_DIR" ]; then
-            echo "ERROR: Flutter app nahi mili. pubspec.yaml aur lib/main.dart check karo."
-            exit 1
-          fi
-
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-          echo "Flutter project found: $APP_DIR"
-
       - name: Prepare Android
-        shell: bash
+        working-directory: source/shared_app
         run: |
-          cd "$APP_DIR"
-
-          if [ ! -f android/gradlew ]; then
-            flutter create --platforms=android \
-              --org com.deviceagent \
-              --project-name shared_app .
-          fi
-
-          rm -f android/settings.gradle.kts
-          rm -f android/build.gradle.kts
-          rm -f android/app/build.gradle.kts
-
-      - name: Get Dependencies
-        run: |
-          cd "$APP_DIR"
+          flutter create --platforms=android \
+            --org com.deviceagent \
+            --project-name shared_app .
           flutter pub get
 
       - name: Build APK
+        working-directory: source/shared_app
+        env:
+          CONTROL_API_URL: ${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
         run: |
-          cd "$APP_DIR"
           flutter build apk --debug \
-            --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
+            --dart-define=CONTROL_API_URL="$CONTROL_API_URL"
 
-      - name: Collect APK
-        run: |
-          mkdir -p out/android
-          cp "$APP_DIR"/build/app/outputs/flutter-apk/*.apk out/android/
-
-      - name: Upload APK
+      - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: Universal-Device-Agent-Android-APK
-          path: out/android/
+          path: source/shared_app/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
   windows:
     name: Build Windows EXE
+    needs: prepare
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: uda-source
+          path: source
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -102,85 +162,46 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Find Flutter Project
-        shell: pwsh
-        run: |
-          $project = Get-ChildItem $env:GITHUB_WORKSPACE `
-            -Filter pubspec.yaml -Recurse -File |
-            Where-Object {
-              Test-Path (Join-Path $_.DirectoryName "lib\main.dart")
-            } |
-            Select-Object -First 1
-
-          if (-not $project) {
-            throw "Flutter project nahi mili. pubspec.yaml aur lib/main.dart check karo."
-          }
-
-          "APP_DIR=$($project.DirectoryName)" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          Write-Host "Flutter project: $($project.DirectoryName)"
-
       - name: Prepare Windows
-        shell: pwsh
+        working-directory: source/shared_app
         run: |
-          Set-Location $env:APP_DIR
-
-          if (-not (Test-Path "windows/CMakeLists.txt")) {
-            flutter create --platforms=windows `
-              --org com.deviceagent `
-              --project-name shared_app .
-          }
-
-      - name: Get Dependencies
-        shell: pwsh
-        run: |
-          Set-Location $env:APP_DIR
+          flutter create --platforms=windows `
+            --org com.deviceagent `
+            --project-name shared_app .
           flutter pub get
 
-      - name: Build Windows App
-        shell: pwsh
+      - name: Build Windows
+        working-directory: source/shared_app
+        env:
+          CONTROL_API_URL: ${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
         run: |
-          Set-Location $env:APP_DIR
           flutter build windows --release `
-            --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
+            --dart-define=CONTROL_API_URL="$env:CONTROL_API_URL"
 
-      - name: Collect Windows Files
-        shell: pwsh
-        run: |
-          $source = Join-Path $env:APP_DIR "build/windows/x64/runner/Release"
-          if (-not (Test-Path $source)) {
-            throw "Windows build output nahi mila."
-          }
-
-          $destination = Join-Path $env:GITHUB_WORKSPACE "out/windows"
-          New-Item -ItemType Directory -Force -Path $destination | Out-Null
-          Copy-Item "$source/*" $destination -Recurse -Force
-
-      - name: Upload Windows App
+      - name: Upload Windows App Files
         uses: actions/upload-artifact@v4
         with:
           name: Universal-Device-Agent-Windows
-          path: out/windows/
+          path: source/shared_app/build/windows/x64/runner/Release/
           if-no-files-found: error
 
   linux:
     name: Build Linux App
+    needs: prepare
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: uda-source
+          path: source
 
       - name: Install Linux Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
-            libgtk-3-dev libglib2.0-dev \
-            libpipewire-0.3-dev libx11-dev \
-            libxtst-dev libturbojpeg0-dev \
-            libebook1.2-dev
+            libgtk-3-dev libglib2.0-dev
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -188,56 +209,25 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Find Flutter Project
-        shell: bash
-        run: |
-          APP_DIR=""
-          while IFS= read -r file; do
-            dir="${file%/pubspec.yaml}"
-            if [ -f "$dir/lib/main.dart" ]; then
-              APP_DIR="$(realpath "$dir")"
-              break
-            fi
-          done < <(find . -type f -name pubspec.yaml \
-            -not -path '*/.dart_tool/*')
-
-          if [ -z "$APP_DIR" ]; then
-            echo "ERROR: Flutter app nahi mili."
-            exit 1
-          fi
-
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-          echo "Flutter project found: $APP_DIR"
-
       - name: Prepare Linux
+        working-directory: source/shared_app
         run: |
-          cd "$APP_DIR"
-
-          if [ ! -f linux/CMakeLists.txt ]; then
-            flutter create --platforms=linux \
-              --org com.deviceagent \
-              --project-name shared_app .
-          fi
-
-      - name: Get Dependencies
-        run: |
-          cd "$APP_DIR"
+          flutter create --platforms=linux \
+            --org com.deviceagent \
+            --project-name shared_app .
           flutter pub get
 
-      - name: Build Linux App
+      - name: Build Linux
+        working-directory: source/shared_app
+        env:
+          CONTROL_API_URL: ${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
         run: |
-          cd "$APP_DIR"
           flutter build linux --release \
-            --dart-define=CONTROL_API_URL=${{ vars.CONTROL_API_URL || 'http://localhost:8080' }}
-
-      - name: Collect Linux App
-        run: |
-          mkdir -p out/linux
-          cp -a "$APP_DIR"/build/linux/x64/release/bundle/. out/linux/
+            --dart-define=CONTROL_API_URL="$CONTROL_API_URL"
 
       - name: Upload Linux App
         uses: actions/upload-artifact@v4
         with:
           name: Universal-Device-Agent-Linux
-          path: out/linux/
+          path: source/shared_app/build/linux/x64/release/bundle/
           if-no-files-found: error
